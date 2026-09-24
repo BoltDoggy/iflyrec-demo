@@ -59,13 +59,19 @@ export const MINDMAP_SYSTEM = `把会议内容整理成思维导图大纲, 只�
 格式: 一级标题(#)为会议主题(≤12字), 二级标题(##)为 3-6 个主题分支(≤15字), 三级(###)及列表项为具体要点(每条≤20字)。
 层次不超过 3 级, 内容忠实于文稿。`;
 
+export const BRIEF_SYSTEM = `用一句话概括这段多人对话录音讲了什么, 30 字以内。
+直接输出这句话本身: 不要引号、不要"简介:"之类前缀、不要任何解释。`;
+
 /* ---------------- mock ---------------- */
 
-const mockLlmChat = (kind: "summary" | "mindmap"): LlmChat =>
+const mockLlmChat = (kind: "summary" | "mindmap" | "brief"): LlmChat =>
 async (_system, user) => {
   _system;
   await new Promise((r) => setTimeout(r, 400));
   const head = user.split("\n").find((l) => l.trim()) ?? "会议";
+  if (kind === "brief") {
+    return `(mock)${head.replace(/^\[[\d:]+\]\s*/, "").slice(0, 24)}…的双人讨论录音。`;
+  }
   if (kind === "summary") {
     return `> ⚠️ mock 数据(未配置真实 LLM)
 ## 一句话总结
@@ -111,4 +117,8 @@ export function getSummaryChat(cfg: LlmConfig): LlmChat {
 
 export function getMindmapChat(cfg: LlmConfig): LlmChat {
   return cfg.provider === "mock" ? mockLlmChat("mindmap") : (s, u) => openaiChat(cfg, s, u);
+}
+
+export function getBriefChat(cfg: LlmConfig): LlmChat {
+  return cfg.provider === "mock" ? mockLlmChat("brief") : (s, u) => openaiChat(cfg, s, u);
 }

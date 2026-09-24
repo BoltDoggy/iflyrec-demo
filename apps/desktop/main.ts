@@ -6,13 +6,15 @@
  *
  * 运行: deno task start   (--no-open 不自动开窗口, PORT=xxx 自定义端口)
  */
-import { DATA_DIR, FILES, RESULTS_DIR, readJson, writeJson } from "./src/store.ts";
+import { DATA_DIR, FILES, readJson, writeJson } from "./src/store.ts";
+import { getDb } from "./src/db.ts";
 import {
   type ApiConfig,
   activeIds,
   allStatuses,
   enqueue,
   getResult,
+  recoverInterrupted,
 } from "./src/pipeline.ts";
 
 const PORT = Number(Deno.env.get("PORT") ?? 17654);
@@ -181,6 +183,10 @@ interface Entry {
   copies: CopyInfo[];
   processed: boolean;
   processedAt: string | null;
+  uploaded: boolean;
+  uploadedAt: string | null;
+  uploadObject: string | null;
+  brief: string | null;
 }
 interface SkippedFolder {
   path: string;
@@ -224,10 +230,8 @@ async function scanAll(
     }
   }
 
-  // 2. 指纹(带 size+mtime 缓存) -> 按内容分组, 多副本合一
-  const cache = await readJson<
-    Record<string, { size: number; mtime: number; hash: string }>
-  >(FILES.cache, {});
+  // 2. 指纹(带 size+mtime 缓存, SQLite) -> 按内容分组, 多副本合一
+  const db = getDb();
   const groups = new Map<string, { size: number; mtime: number; copies: CopyInfo[] }>();
   for (const p of paths) {
     let st;
@@ -236,16 +240,16 @@ async function scanAll(
     } catch {
       continue;
     }
-    const c = cache[p];
-    let hash: string | undefined;
     const mtime = st.mtime?.getTime() ?? 0;
+    const c = db.getCachedHash(p);
+    let hash: string | undefined;
     if (c && c.size === st.size && c.mtime === mtime) {
       hash = c.hash;
     } else {
       const h = await sha256(p);
       if (h === null) continue;
       hash = h;
-      cache[p] = { size: st.size, mtime, hash: h };
+      db.putCachedHash(p, st.size, mtime, h);
     }
     const g = groups.get(hash) ?? {
       size: st.size,
@@ -255,9 +259,10 @@ async function scanAll(
     g.copies.push({ path: p, folder: folderOf(p, folders) });
     groups.set(hash, g);
   }
-  await writeJson(FILES.cache, cache);
 
-  const processed = await readJson<Record<string, { at: string }>>(FILES.processed, {});
+  const processed = db.getProcessed();
+  const uploads = db.getUploads();
+  const briefs = db.getBriefs();
   const entries: Entry[] = [...groups.entries()].map(([hash, g]) => {
     const copies = g.copies.sort((a, b) => a.path.localeCompare(b.path));
     return {
@@ -266,8 +271,12 @@ async function scanAll(
       size: g.size,
       mtime: g.mtime,
       copies,
-      processed: hash in processed,
-      processedAt: processed[hash]?.at ?? null,
+      processed: processed.has(hash),
+      processedAt: processed.get(hash)?.at ?? null,
+      uploaded: uploads.has(hash),
+      uploadedAt: uploads.get(hash)?.at ?? null,
+      uploadObject: uploads.get(hash)?.objectKey ?? null,
+      brief: briefs.get(hash) ?? null,
     };
   }).sort((a, b) => a.name.localeCompare(b.name));
   return { entries, skipped };
@@ -364,17 +373,9 @@ async function handle(req: Request): Promise<Response> {
 
   if (pathname === "/api/reset" && req.method === "POST") {
     const body = await req.json().catch(() => ({})) as { scope?: string };
-    if (body.scope === "registry" || body.scope === "all") {
-      try {
-        await Deno.remove(FILES.cache);
-      } catch { /* 不存在则忽略 */ }
-    }
-    if (body.scope === "results" || body.scope === "all") {
-      try {
-        await Deno.remove(`${FILES.processed}`);
-        await Deno.remove(RESULTS_DIR, { recursive: true });
-      } catch { /* 不存在则忽略 */ }
-    }
+    const db = getDb();
+    if (body.scope === "registry" || body.scope === "all") db.clearRegistry();
+    if (body.scope === "results" || body.scope === "all") db.clearResults();
     return json({ ok: true });
   }
 
@@ -403,4 +404,8 @@ Deno.serve({ port: PORT }, handle);
 const url = `http://localhost:${PORT}`;
 console.log(`文件处理台已启动: ${url}`);
 console.log(`数据目录: ${DATA_DIR} (settings/processed/hash-cache/results)`);
+const recovered = await recoverInterrupted();
+if (recovered > 0) {
+  console.log(`[pipeline] 已将 ${recovered} 个上次中断的任务标记为失败(可重试)`);
+}
 if (!NO_OPEN) await openWindow(url);

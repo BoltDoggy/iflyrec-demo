@@ -1,45 +1,26 @@
 /**
- * 处理管线: 转写 -> 纪要总结 -> 思维导图大纲。
- * 分阶段落盘(results/{指纹}.json), 失败重试时复用已完成阶段, 不重复计费。
+ * 处理管线: 上传(独立并发) -> 转写(带说话人分离) -> 纪要总结 -> 思维导图大纲。
+ * 分阶段落盘(SQLite), 失败重试时复用已完成阶段, 不重复计费。
  */
-import { FILES, RESULTS_DIR, readJson, writeJson } from "./store.ts";
-import { type AsrConfig, type Transcript, mockAsr } from "./providers/asr.ts";
-import { doubaoAsr } from "./providers/doubao.ts";
+import { type ProcessResult, getDb } from "./db.ts";
+import { type AsrAdapter, type UploadedRef, mockAsr } from "./providers/asr.ts";
+import { doubaoAdapter } from "./providers/doubao.ts";
 import {
-  type LlmConfig,
+  BRIEF_SYSTEM,
   MINDMAP_SYSTEM,
   SUMMARY_SYSTEM,
+  getBriefChat,
   getMindmapChat,
   getSummaryChat,
   transcriptToPromptText,
 } from "./providers/llm.ts";
-import { type Turn, mergeSegments } from "./turns.ts";
+import { mergeSegments } from "./turns.ts";
 
-export type Stage = "transcribing" | "summarizing" | "mindmapping";
-export type ResultStatus = "processing" | "done" | "error";
-
-export interface ProcessResult {
-  id: string; // 内容指纹
-  name: string;
-  status: ResultStatus;
-  stage?: Stage;
-  error?: string;
-  transcript?: Transcript;
-  turns?: Turn[];
-  summary?: string;
-  mindmap?: string;
-  meta?: {
-    at?: string;
-    asrMs?: number;
-    llmMs?: number;
-    duration?: number;
-    asrProvider?: string;
-  };
-}
+export type { ProcessResult, ResultStatus, Stage } from "./db.ts";
 
 export interface ApiConfig {
-  asr: AsrConfig;
-  llm: LlmConfig;
+  asr: import("./providers/asr.ts").AsrConfig;
+  llm: import("./providers/llm.ts").LlmConfig;
 }
 
 export interface PipelineEntry {
@@ -48,62 +29,96 @@ export interface PipelineEntry {
   name: string;
 }
 
-export const MAX_CONCURRENT = 2;
-const resultFile = (id: string) => `${RESULTS_DIR}/${id}.json`;
+export const MAX_PROC_CONCURRENT = 2; // 转写+LLM 是慢阶段, 限制 2
+export const MAX_UPLOAD_CONCURRENT = 4; // 上传快且独立, 单独排队不占识别名额
 const active = new Set<string>();
 
-function getAsr(cfg: ApiConfig) {
-  return cfg.asr.provider === "doubao" ? doubaoAsr : mockAsr;
+function getAsr(cfg: ApiConfig): AsrAdapter {
+  return cfg.asr.provider === "doubao" ? doubaoAdapter : { transcribe: mockAsr };
 }
 
-/* ---------- 简单并发限制 (同时最多 MAX_CONCURRENT 个文件) ---------- */
+/* ---------- 并发限制: 上传与识别各自独立的水位 ---------- */
 
-let activeCount = 0;
-const waiting: Array<() => void> = [];
-
-async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (activeCount >= MAX_CONCURRENT) {
-    await new Promise<void>((resolve) => waiting.push(resolve));
-  }
-  activeCount++;
-  try {
-    return await fn();
-  } finally {
-    activeCount--;
-    waiting.shift()?.();
-  }
+function makeSlot(max: number) {
+  let activeCount = 0;
+  const waiting: Array<() => void> = [];
+  return async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
+    if (activeCount >= max) {
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    }
+    activeCount++;
+    try {
+      return await fn();
+    } finally {
+      activeCount--;
+      waiting.shift()?.();
+    }
+  };
 }
 
-/* ---------- 主流程 ---------- */
-
-async function markProcessed(id: string, name: string): Promise<void> {
-  const processed = await readJson<
-    Record<string, { at: string; name: string }>
-  >(FILES.processed, {});
-  processed[id] = { at: new Date().toISOString().slice(0, 19), name };
-  await writeJson(FILES.processed, processed);
-}
+const withProcSlot = makeSlot(MAX_PROC_CONCURRENT);
+const withUploadSlot = makeSlot(MAX_UPLOAD_CONCURRENT);
 
 async function run(entry: PipelineEntry, cfg: ApiConfig): Promise<void> {
-  await withSlot(async () => {
-    const file = resultFile(entry.id);
-    const r: ProcessResult = await readJson(file, {
-      id: entry.id,
-      name: entry.name,
-      status: "processing",
-    });
-    r.id = entry.id;
-    r.name = entry.name;
-    r.status = "processing";
-    r.error = undefined;
+  const db = getDb();
+  const r: ProcessResult = db.getResult(entry.id) ?? {
+    id: entry.id,
+    name: entry.name,
+    status: "processing",
+  };
+  r.id = entry.id;
+  r.name = entry.name;
+  r.status = "processing";
+  r.error = undefined;
+  const adapter = getAsr(cfg);
 
+  // ---- 上传阶段: 独立队列(并发 4), 不占识别名额; 每个文件上传完即可排识别 ----
+  let uploaded: UploadedRef | null = null;
+  if (!r.transcript?.segments?.length && adapter.upload) {
+    try {
+      r.stage = "queued"; // 等待上传坑位
+      db.saveResult(r);
+      uploaded = await withUploadSlot(() => {
+        r.stage = "uploading"; // 真正开始上传
+        db.saveResult(r);
+        return adapter.upload!(entry.path, cfg.asr, { hash: entry.id });
+      });
+      if (uploaded) r.meta = { ...r.meta, tos: { objectKey: uploaded.objectKey } };
+    } catch (err) {
+      r.status = "error";
+      r.stage = undefined;
+      r.error = err instanceof Error ? err.message : String(err);
+      db.saveResult(r);
+      console.error(`[pipeline] 上传失败 ${entry.name}:`, r.error);
+      return;
+    }
+  }
+
+  // ---- 识别 + 总结 + 导图: 慢阶段队列(并发 2) ----
+  r.stage = "queued"; // 等待识别坑位
+  db.saveResult(r);
+  await withProcSlot(async () => {
     try {
       // 断点续跑: 已有转写结果则跳过 ASR (不重复计费)
       if (!r.transcript?.segments?.length) {
         r.stage = "transcribing";
-        await writeJson(file, r, RESULTS_DIR);
+        db.saveResult(r);
         const t0 = Date.now();
-        r.transcript = await getAsr(cfg)(entry.path, cfg.asr, { hash: entry.id });
+        r.transcript = await adapter.transcribe(
+          entry.path,
+          cfg.asr,
+          {
+            hash: entry.id,
+            // 上次运行遗留的任务 id(如豆包): 优先接续查询, 不重复提交
+            resume: r.asrState,
+            // provider 途中上报状态(任务 id) -> 持久化到结果
+            saveState: (state: Record<string, string>) => {
+              r.asrState = Object.keys(state).length ? { ...state } : undefined;
+              db.saveResult(r);
+            },
+          },
+          uploaded ?? undefined,
+        );
         r.meta = {
           ...r.meta,
           asrMs: Date.now() - t0,
@@ -111,25 +126,35 @@ async function run(entry: PipelineEntry, cfg: ApiConfig): Promise<void> {
           duration: r.transcript.duration,
         };
         r.turns = mergeSegments(r.transcript.segments);
-        await writeJson(file, r, RESULTS_DIR);
+        db.saveResult(r);
       } else if (!r.turns?.length) {
         r.turns = mergeSegments(r.transcript.segments);
       }
 
       const promptText = transcriptToPromptText(r.turns!);
 
+      // 一句话简介(列表展示); 已有文稿的旧结果重跑时只补这一步
+      if (!r.brief) {
+        r.stage = "summarizing";
+        db.saveResult(r);
+        const t0 = Date.now();
+        r.brief = (await getBriefChat(cfg.llm)(BRIEF_SYSTEM, promptText)).trim();
+        r.meta = { ...r.meta, llmMs: (r.meta?.llmMs ?? 0) + (Date.now() - t0) };
+        db.saveResult(r);
+      }
+
       if (!r.summary) {
         r.stage = "summarizing";
-        await writeJson(file, r, RESULTS_DIR);
+        db.saveResult(r);
         const t0 = Date.now();
         r.summary = await getSummaryChat(cfg.llm)(SUMMARY_SYSTEM, promptText);
         r.meta = { ...r.meta, llmMs: (r.meta?.llmMs ?? 0) + (Date.now() - t0) };
-        await writeJson(file, r, RESULTS_DIR);
+        db.saveResult(r);
       }
 
       if (!r.mindmap) {
         r.stage = "mindmapping";
-        await writeJson(file, r, RESULTS_DIR);
+        db.saveResult(r);
         const t0 = Date.now();
         r.mindmap = await getMindmapChat(cfg.llm)(MINDMAP_SYSTEM, promptText);
         r.meta = { ...r.meta, llmMs: (r.meta?.llmMs ?? 0) + (Date.now() - t0) };
@@ -138,8 +163,8 @@ async function run(entry: PipelineEntry, cfg: ApiConfig): Promise<void> {
       r.status = "done";
       r.stage = undefined;
       r.meta = { ...r.meta, at: new Date().toISOString().slice(0, 19) };
-      await writeJson(file, r, RESULTS_DIR);
-      await markProcessed(entry.id, entry.name);
+      db.saveResult(r);
+      db.markProcessed(entry.id, entry.name);
       console.log(
         `[pipeline] 完成 ${entry.name} (ASR ${r.meta.asrMs}ms, LLM ${r.meta.llmMs}ms)`,
       );
@@ -147,7 +172,7 @@ async function run(entry: PipelineEntry, cfg: ApiConfig): Promise<void> {
       r.status = "error";
       r.stage = undefined;
       r.error = err instanceof Error ? err.message : String(err);
-      await writeJson(file, r, RESULTS_DIR);
+      db.saveResult(r);
       console.error(`[pipeline] 失败 ${entry.name}:`, r.error);
     }
   });
@@ -165,27 +190,17 @@ export function enqueue(entries: PipelineEntry[], cfg: ApiConfig): number {
   return queued;
 }
 
-export async function getResult(id: string): Promise<ProcessResult | null> {
-  if (!/^[0-9a-f]{6,64}$/.test(id)) return null;
-  const r = await readJson<ProcessResult | null>(resultFile(id), null);
-  return r;
+export function getResult(id: string): Promise<ProcessResult | null> {
+  if (!/^[0-9a-f]{6,64}$/.test(id)) return Promise.resolve(null);
+  return Promise.resolve(getDb().getResult(id));
 }
 
-/** 所有结果的状态摘要, 供前端轮询。 */
-export async function allStatuses(): Promise<
-  Record<string, { status: ResultStatus; stage?: Stage; error?: string }>
-> {
-  const out: Record<string, { status: ResultStatus; stage?: Stage; error?: string }> = {};
-  try {
-    for await (const e of Deno.readDir(RESULTS_DIR)) {
-      if (!e.isFile || !e.name.endsWith(".json")) continue;
-      const r = await readJson<ProcessResult | null>(`${RESULTS_DIR}/${e.name}`, null);
-      if (r?.id) out[r.id] = { status: r.status, stage: r.stage, error: r.error };
-    }
-  } catch {
-    // 目录不存在时返回空
-  }
-  return out;
+export function allStatuses() {
+  return Promise.resolve(getDb().allStatuses());
+}
+
+export function recoverInterrupted(): Promise<number> {
+  return Promise.resolve(getDb().recoverInterrupted());
 }
 
 export const activeIds = (): string[] => [...active];

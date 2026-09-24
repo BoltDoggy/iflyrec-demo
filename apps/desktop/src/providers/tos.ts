@@ -7,6 +7,7 @@
  * 下载走 6 小时有效的预签名 URL, 桶无需开公共读。
  */
 import { TosClient } from "npm:@volcengine/tos-sdk@2.9.1";
+import { getDb } from "../db.ts";
 
 export interface TosConfig {
   region: string;
@@ -30,12 +31,16 @@ export function tosConfigError(t: TosConfig): string {
   return missing.length ? `TOS 配置缺少: ${missing.join(", ")}` : "";
 }
 
-/** 上传文件到 TOS 并返回预签名下载 URL。 */
+/**
+ * 上传文件到 TOS 并返回预签名下载 URL。
+ * 对象 key 用内容指纹命名, 已存在(未过期)则跳过上传 —— 幂等且省流量。
+ */
 export async function uploadForUrl(
   file: string,
   key: string,
   cfg: TosConfig,
-): Promise<{ url: string; objectKey: string }> {
+  contentHash?: string,
+): Promise<{ url: string; objectKey: string; uploaded: boolean }> {
   const client = new TosClient({
     accessKeyId: cfg.accessKeyId,
     accessKeySecret: cfg.accessKeySecret,
@@ -43,18 +48,31 @@ export async function uploadForUrl(
     endpoint: cfg.endpoint,
   });
   const objectKey = `${cfg.prefix.replace(/\/+$/, "")}/${key}`;
+  let uploaded = false;
   try {
-    // putObjectFromFile 由 SDK 流式读文件, 大音频不必整块进内存
-    await client.putObjectFromFile({
+    await client.headObject({ bucket: cfg.bucket, key: objectKey });
+  } catch {
+    try {
+      // putObjectFromFile 由 SDK 流式读文件, 大音频不必整块进内存
+      await client.putObjectFromFile({
+        bucket: cfg.bucket,
+        key: objectKey,
+        filePath: file,
+        // 一天后自动删除, 录音不在桶里累积; 过期后重试会重新上传
+        headers: { "x-tos-object-expires": "1" },
+      });
+      uploaded = true;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(`TOS 上传失败: ${msg.slice(0, 200)}`);
+    }
+  }
+  if (contentHash) {
+    getDb().markUploaded(contentHash, {
       bucket: cfg.bucket,
-      key: objectKey,
-      filePath: file,
-      // 一天后自动删除, 录音不在桶里累积; 重试会重新上传
-      headers: { "x-tos-object-expires": "1" },
+      objectKey,
+      at: new Date().toISOString().slice(0, 19),
     });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new Error(`TOS 上传失败: ${msg.slice(0, 200)}`);
   }
   const url = String(
     client.getPreSignedUrl({
@@ -64,5 +82,5 @@ export async function uploadForUrl(
       expires: 6 * 3600, // URL 6 小时有效, 覆盖识别窗口
     }),
   );
-  return { url, objectKey };
+  return { url, objectKey, uploaded };
 }

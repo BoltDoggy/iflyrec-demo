@@ -12,13 +12,20 @@
  *
  * 文档: docs.volcengine.com/docs/DoubaoVoice (录音文件识别标准版 / 极速版识别)
  */
-import type { AsrConfig, AsrFileMeta, AsrProvider, Segment, Transcript } from "./asr.ts";
+import type {
+  AsrAdapter,
+  AsrConfig,
+  AsrFileMeta,
+  AsrProvider,
+  Segment,
+  Transcript,
+  UploadedRef,
+} from "./asr.ts";
 import { tosConfigError, tosConfigured, uploadForUrl } from "./tos.ts";
 import { fixWavFile } from "../wav.ts";
 
 const HOST = "https://openspeech.bytedance.com";
 const POLL_INTERVAL = 2000;
-const POLL_TIMEOUT = 10 * 60 * 1000; // 标准版单文件转写最长等待 10 分钟
 
 export class DoubaoError extends Error {
   constructor(message: string, public code?: string) {
@@ -173,7 +180,7 @@ async function recognizeFlash(file: string, cfg: AsrConfig): Promise<Transcript>
     cfg.apiKey,
     cfg.resourceId,
     uuid(),
-    10 * 60_000, // 长音频同步识别可能要几分钟
+    2 * 60 * 60 * 1000, // 同步识别长音频可能要很久, 与极速版时长上限(2h)对齐
   );
   const body = await res.json() as Record<string, unknown>;
   const code = res.headers.get("X-Api-Status-Code") ?? "";
@@ -187,27 +194,47 @@ async function recognizeFlash(file: string, cfg: AsrConfig): Promise<Transcript>
   return parseQueryResponse(body);
 }
 
-/** 标准版: 上传 TOS 取 URL -> submit -> 轮询 query。 */
+/** 标准版上传阶段: 上传 TOS 取预签名 URL。极速版/mock 返回 null(无需上传)。 */
+export const doubaoUpload: NonNullable<AsrAdapter["upload"]> = async (file, cfg, meta) => {
+  if (cfg.edition !== "standard" || !cfg.apiKey) return null;
+  if (!tosConfigured(cfg.tos)) return null; // 配置缺失的报错留给转写阶段, 信息更完整
+  const fixed = await fixWavFile(file);
+  try {
+    const ext = fixed.slice(fixed.lastIndexOf(".")).toLowerCase();
+    const key = `${meta?.hash ?? fixed.slice(fixed.lastIndexOf("/") + 1).replace(/\.\w+$/, "")}${ext}`;
+    return await uploadForUrl(fixed, key, cfg.tos, meta?.hash);
+  } finally {
+    if (fixed !== file) await Deno.remove(fixed).catch(() => {});
+  }
+};
+
+/** 标准版: 提交音频 URL -> 轮询 query。uploaded 为管线预上传的结果(缺省时自行上传)。 */
 async function recognizeStandard(
   file: string,
   cfg: AsrConfig,
-  meta?: AsrFileMeta,
+  meta: AsrFileMeta | undefined,
+  uploaded?: UploadedRef,
 ): Promise<Transcript> {
   if (!tosConfigured(cfg.tos)) {
-    return Promise.reject(
-      new DoubaoError(
-        `标准版仅支持音频 URL, 需要先配置 TOS 上传 (${tosConfigError(cfg.tos) || "设置 → 服务配置 → TOS"})`,
-      ),
+    throw new DoubaoError(
+      `标准版仅支持音频 URL, 需要先配置 TOS 上传 (${tosConfigError(cfg.tos) || "设置 → 服务配置 → TOS"})`,
     );
   }
-  // 对象 key 用内容指纹: 同内容不重复上传, 重试幂等
-  const ext = file.slice(file.lastIndexOf(".")).toLowerCase();
-  const key = `${meta?.hash ?? file.slice(file.lastIndexOf("/") + 1).replace(/\.\w+$/, "")}${ext}`;
-  const { url } = await uploadForUrl(file, key, cfg.tos);
-  return recognizeStandardByUrl(url, audioFormat(file, false), cfg);
+  let ref = uploaded;
+  if (!ref) {
+    const fixed = await fixWavFile(file);
+    try {
+      const ext = fixed.slice(fixed.lastIndexOf(".")).toLowerCase();
+      const key = `${meta?.hash ?? fixed.slice(fixed.lastIndexOf("/") + 1).replace(/\.\w+$/, "")}${ext}`;
+      ref = await uploadForUrl(fixed, key, cfg.tos, meta?.hash);
+    } finally {
+      if (fixed !== file) await Deno.remove(fixed).catch(() => {});
+    }
+  }
+  return recognizeStandardByUrl(ref.url, audioFormat(file, false), cfg, meta);
 }
 
-export const doubaoAsr: AsrProvider = async (file, cfg, meta) => {
+export const doubaoAsr: AsrProvider = async (file, cfg, meta, uploaded) => {
   if (!cfg.apiKey) {
     throw new DoubaoError("未配置豆包 API Key (设置 → 服务配置)");
   }
@@ -217,65 +244,93 @@ export const doubaoAsr: AsrProvider = async (file, cfg, meta) => {
     // 必须 return await: 否则 finally(删临时文件)先于识别完成执行
     return await (cfg.edition === "flash"
       ? recognizeFlash(fixed, cfg)
-      : recognizeStandard(fixed, cfg, meta));
+      : recognizeStandard(fixed, cfg, meta, uploaded));
   } finally {
     if (fixed !== file) await Deno.remove(fixed).catch(() => {});
   }
 };
 
+export const doubaoAdapter: AsrAdapter = { transcribe: doubaoAsr, upload: doubaoUpload };
+
 /* ---------- 标准版 submit/query 实现 ---------- */
+
+/** 查询一次任务状态。 */
+async function queryTask(
+  cfg: AsrConfig,
+  taskId: string,
+): Promise<{
+  cls: "done" | "pending" | "error";
+  code: string;
+  body: Record<string, unknown>;
+}> {
+  const res = await post("/api/v3/auc/bigmodel/query", {}, cfg.apiKey, cfg.resourceId, taskId);
+  const code = res.headers.get("X-Api-Status-Code") ?? "";
+  const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+  return { cls: classifyStatus(code), code, body };
+}
 
 async function recognizeStandardByUrl(
   url: string,
   format: string,
   cfg: AsrConfig,
+  meta?: AsrFileMeta,
 ): Promise<Transcript> {
   // v3 协议(实测): 任务 id 就是提交时自带的 X-Api-Request-Id, 响应体为空 JSON, 查询时复用同一 id
-  const taskId = uuid();
-  const submitRes = await post(
-    "/api/v3/auc/bigmodel/submit",
-    {
-      user: { uid: "iflyrec-demo" },
-      audio: { url, format },
-      request: {
-        model_name: "bigmodel",
-        enable_itn: true,
-        enable_punc: true,
-        enable_speaker_info: true, // 说话人分离(需配合 show_utterances)
-        show_utterances: true,
-        ssd_version: cfg.ssdVersion, // 实测 300 才能有效分离, 200 不分
-      },
-    },
-    cfg.apiKey,
-    cfg.resourceId,
-    taskId,
-  );
-  const submitCode = submitRes.headers.get("X-Api-Status-Code") ?? "";
-  const submitBody = await submitRes.json().catch(() => ({})) as Record<string, unknown>;
-  if (submitCode !== "20000000") {
-    const hint = friendlyStatus(submitCode);
-    throw new DoubaoError(
-      `${hint || apiMessage(submitBody)} (${submitCode})`,
-      submitCode,
-    );
+  let taskId = meta?.resume?.taskId;
+
+  // 断点续跑: 先探测上次遗留的任务 —— 已完成直接拿结果(不重复计费), 已失效则重新提交
+  if (taskId) {
+    const q = await queryTask(cfg, taskId);
+    if (q.cls === "done") return parseQueryResponse(q.body);
+    if (q.cls === "error") {
+      console.log(`[doubao] 旧任务 ${taskId.slice(0, 8)}… 已失效(${q.code}), 重新提交`);
+      meta?.saveState?.({});
+      taskId = undefined;
+    }
+    // pending: 继续轮询该任务
   }
 
-  const deadline = Date.now() + POLL_TIMEOUT;
-  while (Date.now() < deadline) {
-    await sleep(POLL_INTERVAL);
-    const queryRes = await post("/api/v3/auc/bigmodel/query", {}, cfg.apiKey, cfg.resourceId, taskId);
-    const code = queryRes.headers.get("X-Api-Status-Code") ?? "";
-    const queryBody = await queryRes.json() as Record<string, unknown>;
-    const cls = classifyStatus(code);
-    if (cls === "pending") continue;
-    if (cls === "error") {
-      const hint = friendlyStatus(code);
-      throw new DoubaoError(
-        `${hint || apiMessage(queryBody)}${hint ? "" : ` (${code})`}${hint ? ` (${code})` : ""}`,
-        code,
-      );
+  if (!taskId) {
+    taskId = uuid();
+    const submitRes = await post(
+      "/api/v3/auc/bigmodel/submit",
+      {
+        user: { uid: "iflyrec-demo" },
+        audio: { url, format },
+        request: {
+          model_name: "bigmodel",
+          enable_itn: true,
+          enable_punc: true,
+          enable_speaker_info: true, // 说话人分离(需配合 show_utterances)
+          show_utterances: true,
+          ssd_version: cfg.ssdVersion, // 实测 300 才能有效分离, 200 不分
+        },
+      },
+      cfg.apiKey,
+      cfg.resourceId,
+      taskId,
+    );
+    const submitCode = submitRes.headers.get("X-Api-Status-Code") ?? "";
+    const submitBody = await submitRes.json().catch(() => ({})) as Record<string, unknown>;
+    if (submitCode !== "20000000") {
+      const hint = friendlyStatus(submitCode);
+      throw new DoubaoError(`${hint || apiMessage(submitBody)} (${submitCode})`, submitCode);
     }
-    return parseQueryResponse(queryBody);
+    // 持久化任务 id: 服务重启/重试时可接续查询, 不重复提交
+    meta?.saveState?.({ taskId });
   }
-  throw new DoubaoError("识别超时 (10 分钟)");
+
+  // 轮询直到完成 —— 不设客户端超时(文档: 任务通常 3 小时内完成; 放弃等待会浪费已提交的任务)
+  for (;;) {
+    await sleep(POLL_INTERVAL);
+    const q = await queryTask(cfg, taskId);
+    if (q.cls === "pending") continue;
+    if (q.cls === "error") {
+      // 任务已终态失败: 清除状态, 避免重试时反复查询死任务
+      meta?.saveState?.({});
+      const hint = friendlyStatus(q.code);
+      throw new DoubaoError(`${hint || apiMessage(q.body)} (${q.code})`, q.code);
+    }
+    return parseQueryResponse(q.body);
+  }
 }

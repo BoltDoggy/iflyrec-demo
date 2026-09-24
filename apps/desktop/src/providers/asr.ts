@@ -31,13 +31,37 @@ export interface AsrConfig {
 /** 交给 provider 的文件元信息; hash 为内容指纹, 用作 TOS 对象 key。 */
 export interface AsrFileMeta {
   hash?: string;
+  /** 断点续跑: 上次运行保存的 provider 内部状态(如豆包任务 id) */
+  resume?: Record<string, string>;
+  /** 途中上报 provider 状态(如任务 id), 由管线持久化到结果里; 传空对象表示清除 */
+  saveState?: (state: Record<string, string>) => void;
+}
+
+/** 已完成的上传(标准版): 预签名 URL 由管线在上传阶段预先生成。 */
+export interface UploadedRef {
+  url: string;
+  objectKey: string;
 }
 
 export type AsrProvider = (
   file: string,
   cfg: AsrConfig,
   meta?: AsrFileMeta,
+  uploaded?: UploadedRef,
 ) => Promise<Transcript>;
+
+/** 上传阶段: 标准版需要; 返回 null 表示该 provider 无需上传。 */
+export type AsrUploader = (
+  file: string,
+  cfg: AsrConfig,
+  meta?: AsrFileMeta,
+) => Promise<UploadedRef | null>;
+
+/** provider 适配器: 转写与(可选的)上传分离, 上传可单独排队。 */
+export interface AsrAdapter {
+  transcribe: AsrProvider;
+  upload?: AsrUploader;
+}
 
 /** 说话人显示名: "1" -> "说话人 1" */
 export const speakerLabel = (spk: string) => `说话人 ${spk}`;

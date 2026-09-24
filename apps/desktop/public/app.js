@@ -2,6 +2,8 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 
 const STAGE_LABEL = {
+  queued: "排队中",
+  uploading: "上传中",
   transcribing: "转写中",
   summarizing: "总结中",
   mindmapping: "导图中",
@@ -300,15 +302,23 @@ function stopPolling() {
   pollTimer = null;
 }
 
-/** 只更新状态列与工具栏, 不重建表格(保留勾选/展开状态)。 */
+/** 只更新状态/上传列与工具栏, 不重建表格(保留勾选/展开状态)。 */
 function patchStatuses() {
   $$("#tbody tr[data-id]").forEach((tr) => {
+    // 必须带上完整 entry(processed 等), 否则会把已完成刷成未处理
+    const entry = state.entries.find((e) => e.id === tr.dataset.id) ?? { id: tr.dataset.id };
     const cell = tr.querySelector("td:nth-child(2)");
-    if (cell) cell.innerHTML = statusBadgeHtml({ id: tr.dataset.id });
+    if (cell) cell.innerHTML = statusBadgeHtml(entry);
+    const upCell = tr.querySelector("td:nth-child(3)");
+    const st = state.statuses[tr.dataset.id];
+    if (upCell && st) {
+      upCell.innerHTML = st.uploaded
+        ? `<span class="badge up">已上传</span>`
+        : `<span class="badge">未上传</span>`;
+    }
   });
   updateToolbar();
 }
-
 // ---------- 渲染 ----------
 
 const visibleEntries = () =>
@@ -336,6 +346,9 @@ function statusBadgeHtml({ id, processed, processedAt }) {
     const msg = state.statuses[id]?.error ?? "处理被中断(服务重启?), 点击行查看并重试";
     return `<span class="badge err" title="${escapeHtml(msg)}">✗ 失败</span>`;
   }
+  if (eff === "done") {
+    return `<span class="badge ok" title="处理于 ${processedAt ?? ""}">✓ 已完成</span>`;
+  }
   return processed
     ? `<span class="badge ok" title="处理于 ${processedAt ?? ""}">✓ 已完成</span>`
     : `<span class="badge">未处理</span>`;
@@ -360,12 +373,20 @@ function renderRows() {
       <tr data-id="${e.id}" class="${e.processed ? "done" : ""}${clickable}">
         <td><input type="checkbox" data-id="${e.id}" ${state.selected.has(e.id) ? "checked" : ""}></td>
         <td>${statusBadgeHtml(e)}</td>
+        <td>${
+          e.uploaded
+            ? `<span class="badge up" title="${escapeHtml(e.uploadObject ?? "")} · ${e.uploadedAt ?? ""}">已上传</span>`
+            : `<span class="badge">未上传</span>`
+        }</td>
         <td class="name" title="指纹 ${e.id.slice(0, 16)}…">${escapeHtml(e.name)}</td>
+        <td class="brief" title="${escapeHtml(e.brief ?? "")}">${
+          e.brief ? escapeHtml(e.brief) : `<span class="hint">—</span>`
+        }</td>
         <td>${humanSize(e.size)}</td>
         <td class="folder" title="${escapeHtml(primary.path)}">${escapeHtml(primary.folder || primary.path)}${copiesBtn}</td>
         <td>${new Date(e.mtime).toLocaleString("sv-SE", { hour12: false })}</td>
       </tr>
-      ${e.copies.length > 1 ? `<tr id="paths-${e.id}" class="paths" hidden><td colspan="6"><ul>${
+      ${e.copies.length > 1 ? `<tr id="paths-${e.id}" class="paths" hidden><td colspan="8"><ul>${
         e.copies.map((c) => `<li title="${escapeHtml(c.path)}">${escapeHtml(c.path)}</li>`).join("")
       }</ul></td></tr>` : ""}`;
     })
@@ -402,6 +423,13 @@ async function openDetail(id) {
   if (r.meta?.llmMs) meta.push(`LLM ${(r.meta.llmMs / 1000).toFixed(1)}s`);
   if (r.meta?.at) meta.push(r.meta.at.replace("T", " "));
   $("#modal-meta").innerHTML = meta.map((m) => `<span>${escapeHtml(m)}</span>`).join("");
+  const briefEl = $("#modal-brief");
+  if (r.brief) {
+    briefEl.textContent = `简介：${r.brief}`;
+    briefEl.hidden = false;
+  } else {
+    briefEl.hidden = true;
+  }
 
   // 转写文稿
   const transcript = $("#panel-transcript");
