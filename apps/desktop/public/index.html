@@ -10,7 +10,7 @@
   <header>
     <div>
       <h1>文件处理台</h1>
-      <p class="sub">目录扫描 · 内容去重 · 批量处理（当前处理逻辑为 mock）</p>
+      <p class="sub">目录扫描 · 内容去重 · 转写 / 总结 / 思维导图</p>
     </div>
     <button id="scan" class="primary">扫描</button>
   </header>
@@ -18,15 +18,81 @@
   <section class="card" id="settings">
     <div class="row">
       <span class="label">文件夹</span>
-      <input id="new-folder" type="text" placeholder="输入绝对路径, 回车或点添加, 如 /Users/me/Documents">
+      <input id="new-folder" type="text" placeholder="输入绝对路径, 回车或点添加, 可直接粘贴终端转义路径">
       <button id="add-folder">添加</button>
     </div>
     <div id="folders" class="chips"></div>
     <div class="row">
       <span class="label">后缀</span>
-      <input id="exts" type="text" placeholder="wav, mp3, txt">
+      <input id="exts" type="text" placeholder="wav, mp3, m4a">
       <button id="save-exts">保存</button>
     </div>
+
+    <details id="api-config" class="api-config">
+      <summary>服务配置（语音转写 / 大模型）</summary>
+      <div class="api-grid">
+        <div class="api-group">
+          <h4>语音转写 ASR</h4>
+          <div class="row"><span class="label">提供方</span>
+            <select id="asr-provider">
+              <option value="mock">mock（离线演示）</option>
+              <option value="doubao">豆包（火山引擎）</option>
+            </select>
+          </div>
+          <div class="row"><span class="label">API Key</span>
+            <input id="asr-key" type="text" placeholder="豆包控制台 → API Key 管理">
+          </div>
+          <div class="row"><span class="label">版本</span>
+            <select id="asr-edition">
+              <option value="flash">极速版（本地文件直传，≤100MB / 2小时）</option>
+              <option value="standard">标准版（仅音频 URL，适合超长音频）</option>
+            </select>
+          </div>
+          <div class="row"><span class="label">Resource ID</span>
+            <input id="asr-resource" type="text" placeholder="留空自动跟随版本: 极速 volc.bigasr.auc_turbo / 标准 volc.bigasr.auc">
+          </div>
+          <div class="row"><span class="label">分离引擎</span>
+            <select id="asr-ssd">
+              <option value="300">300（说话人分离，推荐）</option>
+              <option value="200">200（不分离，不建议）</option>
+            </select>
+          </div>
+          <div class="row"><span class="label">TOS Bucket</span>
+            <input id="tos-bucket" type="text" placeholder="标准版上传用, 如 my-audio-bucket">
+          </div>
+          <div class="row"><span class="label">TOS Region</span>
+            <input id="tos-region" type="text" placeholder="cn-beijing">
+          </div>
+          <div class="row"><span class="label">TOS AK/SK</span>
+            <input id="tos-ak" type="text" placeholder="AccessKeyID">
+            <input id="tos-sk" type="password" placeholder="AccessKeySecret">
+          </div>
+        </div>
+        <div class="api-group">
+          <h4>总结 / 思维导图 LLM</h4>
+          <div class="row"><span class="label">提供方</span>
+            <select id="llm-provider">
+              <option value="mock">mock（离线演示）</option>
+              <option value="openai">OpenAI 兼容接口</option>
+            </select>
+          </div>
+          <div class="row"><span class="label">Base URL</span>
+            <input id="llm-base" type="text" placeholder="https://open.bigmodel.cn/api/paas/v4">
+          </div>
+          <div class="row"><span class="label">API Key</span>
+            <input id="llm-key" type="password" placeholder="sk-...">
+          </div>
+          <div class="row"><span class="label">模型</span>
+            <input id="llm-model" type="text" placeholder="glm-4-flash">
+          </div>
+        </div>
+      </div>
+      <div class="row">
+        <span class="label"></span>
+        <button id="save-api" class="primary">保存服务配置</button>
+        <span class="hint">Key 只保存在本机 ~/.local/state/iflyrec-desktop/settings.json, 不入库</span>
+      </div>
+    </details>
   </section>
 
   <section class="card">
@@ -35,7 +101,7 @@
       <div id="filters" class="filters">
         <button data-filter="all" class="on">全部</button>
         <button data-filter="todo">未处理</button>
-        <button data-filter="done">已处理</button>
+        <button data-filter="done">已完成</button>
       </div>
       <span id="counts" class="counts"></span>
       <span class="spacer"></span>
@@ -56,6 +122,27 @@
     </table>
     <div id="empty" class="empty" hidden></div>
   </section>
+
+  <div id="modal" hidden>
+    <div class="modal-mask" id="modal-mask"></div>
+    <div class="modal-body">
+      <header class="modal-header">
+        <h3 id="modal-title"></h3>
+        <button id="modal-close" title="关闭 (Esc)">×</button>
+      </header>
+      <div id="modal-meta" class="modal-meta"></div>
+      <nav class="tabs">
+        <button data-tab="transcript" class="on">转写文稿</button>
+        <button data-tab="summary">总结</button>
+        <button data-tab="mindmap">思维导图</button>
+      </nav>
+      <div class="tab-panels">
+        <div id="panel-transcript" class="panel on"></div>
+        <div id="panel-summary" class="panel"></div>
+        <div id="panel-mindmap" class="panel"></div>
+      </div>
+    </div>
+  </div>
 
   <div id="toast" hidden></div>
   <script src="/app.js"></script>

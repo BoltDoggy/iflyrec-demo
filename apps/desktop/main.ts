@@ -2,58 +2,55 @@
  * iflyrec 文件处理台 — Deno 本地服务 + 网页 UI 的桌面应用。
  *
  * 功能: 配置文件夹列表与后缀 -> 扫描(递归) -> 按内容指纹去重 -> 列表展示
- *       -> 多选"处理"(当前为 mock) -> 已处理标记持久化。
- *
- * 处理逻辑目前是 mock, 只集中在 processFiles() 一处, 接真实需求时替换它即可。
+ *       -> 多选"处理"(转写/总结/思维导图, 见 src/pipeline.ts) -> 结果查看与持久化。
  *
  * 运行: deno task start   (--no-open 不自动开窗口, PORT=xxx 自定义端口)
  */
+import { DATA_DIR, FILES, RESULTS_DIR, readJson, writeJson } from "./src/store.ts";
+import {
+  type ApiConfig,
+  activeIds,
+  allStatuses,
+  enqueue,
+  getResult,
+} from "./src/pipeline.ts";
+
 const PORT = Number(Deno.env.get("PORT") ?? 17654);
 const NO_OPEN = Deno.args.includes("--no-open");
 const ROOT = import.meta.dirname ?? ".";
 const PUBLIC = `${ROOT}/public`;
 
-const HOME = Deno.env.get("HOME") ?? ".";
-const DATA_DIR = `${HOME}/.local/state/iflyrec-desktop`;
-const FILES = {
-  settings: `${DATA_DIR}/settings.json`,
-  processed: `${DATA_DIR}/processed.json`,
-  cache: `${DATA_DIR}/hash-cache.json`,
-};
-
 interface Settings {
   folders: string[];
   exts: string[];
-}
-interface ProcessedRecord {
-  at: string;
-  name: string;
-}
-interface CacheEntry {
-  size: number;
-  mtime: number;
-  hash: string;
-}
-interface CopyInfo {
-  path: string;
-  folder: string;
-}
-interface Entry {
-  id: string; // 内容指纹; 同内容多副本共用一个 id, 天然去重
-  name: string;
-  size: number;
-  mtime: number;
-  copies: CopyInfo[];
-  processed: boolean;
-  processedAt: string | null;
-}
-interface SkippedFolder {
-  path: string;
-  reason: "not_found" | "no_perm";
+  api?: ApiConfig;
 }
 
-const DEFAULT_SETTINGS: Settings = { folders: [], exts: ["wav", "mp3", "txt"] };
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+export const DEFAULT_SETTINGS: Settings = { folders: [], exts: ["wav", "mp3", "txt"] };
+export const DEFAULT_API: ApiConfig = {
+  asr: {
+    provider: "mock",
+    apiKey: "",
+    edition: "flash",
+    resourceId: "volc.bigasr.auc_turbo",
+    ssdVersion: "300", // 实测 200 不分离说话人, 300 有效
+    tos: {
+      region: "cn-beijing",
+      endpoint: "tos-cn-beijing.volces.com",
+      bucket: "",
+      accessKeyId: "",
+      accessKeySecret: "",
+      prefix: "iflyrec-desktop",
+    },
+  },
+  llm: {
+    provider: "mock",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    apiKey: "",
+    model: "glm-4-flash",
+  },
+};
+
 const joinPath = (dir: string, name: string) =>
   dir.endsWith("/") ? dir + name : `${dir}/${name}`;
 const basename = (p: string) => p.slice(p.lastIndexOf("/") + 1);
@@ -73,23 +70,6 @@ function cleanPath(raw: string): string {
   return p.replace(/\\(.)/g, "$1").replace(/\/+$/, "") || "/";
 }
 
-// ---------- 持久化 ----------
-
-async function readJson<T>(file: string, fallback: T): Promise<T> {
-  try {
-    return JSON.parse(await Deno.readTextFile(file)) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-async function writeJson(file: string, data: unknown): Promise<void> {
-  await Deno.mkdir(DATA_DIR, { recursive: true });
-  const tmp = `${file}.tmp`;
-  await Deno.writeTextFile(tmp, JSON.stringify(data, null, 1));
-  await Deno.rename(tmp, file);
-}
-
 function normalizeExts(raw: string[]): string[] {
   return [
     ...new Set(
@@ -100,6 +80,64 @@ function normalizeExts(raw: string[]): string[] {
         .filter(Boolean),
     ),
   ];
+}
+
+/** api 配置归一化: 枚举校验 + 空值回落默认, 避免空字符串覆盖。 */
+function withApiDefaults(settings: Settings): Settings {
+  const l = (settings.api?.llm ?? {}) as Partial<ApiConfig["llm"]>;
+  return {
+    ...settings,
+    api: {
+      asr: (() => {
+        const a = settings.api?.asr ?? {} as Partial<ApiConfig["asr"]>;
+        const FLASH_RID = DEFAULT_API.asr.resourceId; // volc.bigasr.auc_turbo
+        const STD_RID = "volc.bigasr.auc";
+        const edition = a.edition === "standard" ? "standard" : "flash";
+        let resourceId = typeof a.resourceId === "string" && a.resourceId.trim()
+          ? a.resourceId.trim()
+          : FLASH_RID;
+        if (resourceId === "volc.bigasr.sauc.duration") resourceId = FLASH_RID; // 早期错误默认
+        // resource id 跟随版本 (用户填的其它自定义 id 不动)
+        if (edition === "standard" && resourceId === FLASH_RID) resourceId = STD_RID;
+        if (edition === "flash" && resourceId === STD_RID) resourceId = FLASH_RID;
+        const t = a.tos;
+        const region = typeof t?.region === "string" && t.region.trim()
+          ? t.region.trim()
+          : DEFAULT_API.asr.tos.region;
+        return {
+          provider: a.provider === "doubao" ? "doubao" : "mock",
+          apiKey: typeof a.apiKey === "string" ? a.apiKey : "",
+          edition,
+          resourceId,
+          ssdVersion: a.ssdVersion === "200" ? "200" : "300",
+          tos: {
+            region,
+            endpoint: typeof t?.endpoint === "string" && t.endpoint.trim()
+              ? t.endpoint.trim()
+              : `tos-${region}.volces.com`,
+            bucket: typeof t?.bucket === "string" ? t.bucket.trim() : "",
+            accessKeyId: typeof t?.accessKeyId === "string" ? t.accessKeyId.trim() : "",
+            accessKeySecret: typeof t?.accessKeySecret === "string"
+              ? t.accessKeySecret.trim()
+              : "",
+            prefix: typeof t?.prefix === "string" && t.prefix.trim()
+              ? t.prefix.trim().replace(/^\/+|\/+$/g, "")
+              : DEFAULT_API.asr.tos.prefix,
+          },
+        };
+      })(),
+      llm: {
+        provider: l.provider === "openai" ? "openai" : "mock",
+        baseUrl: typeof l.baseUrl === "string" && l.baseUrl.trim()
+          ? l.baseUrl.trim()
+          : DEFAULT_API.llm.baseUrl,
+        apiKey: typeof l.apiKey === "string" ? l.apiKey : "",
+        model: typeof l.model === "string" && l.model.trim()
+          ? l.model.trim()
+          : DEFAULT_API.llm.model,
+      },
+    },
+  };
 }
 
 // ---------- 扫描 + 内容去重 ----------
@@ -131,8 +169,28 @@ async function sha256(file: string): Promise<string | null> {
 const folderOf = (p: string, folders: string[]) =>
   folders.find((f) => p === f || p.startsWith(f.endsWith("/") ? f : f + "/")) ?? "";
 
+interface CopyInfo {
+  path: string;
+  folder: string;
+}
+interface Entry {
+  id: string; // 内容指纹; 同内容多副本共用一个 id, 天然去重
+  name: string;
+  size: number;
+  mtime: number;
+  copies: CopyInfo[];
+  processed: boolean;
+  processedAt: string | null;
+}
+interface SkippedFolder {
+  path: string;
+  reason: "not_found" | "no_perm";
+}
+
 /** 扫描所有目录, 按内容指纹分组去重; 返回列表条目和无法读取的目录(含原因)。 */
-async function scanAll(settings: Settings): Promise<{ entries: Entry[]; skipped: SkippedFolder[] }> {
+async function scanAll(
+  settings: Settings,
+): Promise<{ entries: Entry[]; skipped: SkippedFolder[] }> {
   const { folders, exts } = settings;
   const norm = exts.map((e) => e.toLowerCase());
 
@@ -167,11 +225,10 @@ async function scanAll(settings: Settings): Promise<{ entries: Entry[]; skipped:
   }
 
   // 2. 指纹(带 size+mtime 缓存) -> 按内容分组, 多副本合一
-  const cache = await readJson<Record<string, CacheEntry>>(FILES.cache, {});
-  const groups = new Map<
-    string,
-    { size: number; mtime: number; copies: CopyInfo[] }
-  >();
+  const cache = await readJson<
+    Record<string, { size: number; mtime: number; hash: string }>
+  >(FILES.cache, {});
+  const groups = new Map<string, { size: number; mtime: number; copies: CopyInfo[] }>();
   for (const p of paths) {
     let st;
     try {
@@ -200,7 +257,7 @@ async function scanAll(settings: Settings): Promise<{ entries: Entry[]; skipped:
   }
   await writeJson(FILES.cache, cache);
 
-  const processed = await readJson<Record<string, ProcessedRecord>>(FILES.processed, {});
+  const processed = await readJson<Record<string, { at: string }>>(FILES.processed, {});
   const entries: Entry[] = [...groups.entries()].map(([hash, g]) => {
     const copies = g.copies.sort((a, b) => a.path.localeCompare(b.path));
     return {
@@ -214,31 +271,6 @@ async function scanAll(settings: Settings): Promise<{ entries: Entry[]; skipped:
     };
   }).sort((a, b) => a.name.localeCompare(b.name));
   return { entries, skipped };
-}
-
-// ---------- mock 处理 ----------
-
-/**
- * MOCK: 模拟处理耗时后, 把内容指纹写入已处理表。
- * 真实需求落地时, 只需要替换这个函数的内部实现。
- */
-async function processFiles(ids: string[]): Promise<number> {
-  const settings = await readJson<Settings>(FILES.settings, DEFAULT_SETTINGS);
-  const { entries } = await scanAll(settings);
-  const nameOf = new Map(entries.map((e) => [e.id, e.name]));
-  const processed = await readJson<Record<string, ProcessedRecord>>(FILES.processed, {});
-  await Promise.all(
-    ids.map(async (id) => {
-      await delay(250 + Math.random() * 250); // mock 耗时
-      processed[id] = {
-        at: new Date().toISOString().slice(0, 19),
-        name: nameOf.get(id) ?? "",
-      };
-      console.log(`[mock] 已处理: ${nameOf.get(id) ?? id}`);
-    }),
-  );
-  await writeJson(FILES.processed, processed);
-  return ids.length;
 }
 
 // ---------- HTTP ----------
@@ -277,33 +309,67 @@ async function handle(req: Request): Promise<Response> {
 
   if (pathname === "/api/settings") {
     if (req.method === "GET") {
-      return json(await readJson(FILES.settings, DEFAULT_SETTINGS));
+      return json(withApiDefaults(await readJson(FILES.settings, DEFAULT_SETTINGS)));
     }
     if (req.method === "PUT") {
       const body = await req.json().catch(() => null) as Settings | null;
       if (!body || !Array.isArray(body.folders) || !Array.isArray(body.exts)) {
         return json({ error: "参数不合法, 需要 folders 与 exts 数组" }, 400);
       }
-      const settings: Settings = {
+      const settings: Settings = withApiDefaults({
         folders: [...new Set(body.folders.map((f) => cleanPath(String(f))).filter(Boolean))],
         exts: normalizeExts(body.exts.map(String)),
-      };
+        api: body.api,
+      });
       await writeJson(FILES.settings, settings);
       return json(settings);
     }
   }
 
   if (pathname === "/api/scan" && req.method === "POST") {
-    const settings = await readJson<Settings>(FILES.settings, DEFAULT_SETTINGS);
-    return json(await scanAll(settings));
+    const settings = withApiDefaults(await readJson(FILES.settings, DEFAULT_SETTINGS));
+    const r = await scanAll(settings);
+    return json(r);
   }
 
   if (pathname === "/api/process" && req.method === "POST") {
     const body = await req.json().catch(() => null) as { ids?: unknown } | null;
     const ids = [...new Set(((body?.ids as unknown[] | undefined) ?? []).map(String))];
     if (ids.length === 0) return json({ error: "没有选择文件" }, 400);
-    const n = await processFiles(ids);
-    return json({ processed: n });
+    const settings = withApiDefaults(await readJson(FILES.settings, DEFAULT_SETTINGS));
+    const { entries } = await scanAll(settings);
+    const wanted = entries
+      .filter((e) => ids.includes(e.id))
+      .map((e) => ({ id: e.id, path: e.copies[0].path, name: e.name }));
+    if (wanted.length === 0) return json({ error: "选中的文件已不存在, 请先刷新扫描" }, 400);
+    const queued = enqueue(wanted, settings.api!);
+    return json({ queued, active: activeIds() });
+  }
+
+  const resultMatch = pathname.match(/^\/api\/result\/([0-9a-f]{6,64})$/);
+  if (resultMatch && req.method === "GET") {
+    const r = await getResult(resultMatch[1]);
+    return r ? json(r) : json({ error: "结果不存在" }, 404);
+  }
+
+  if (pathname === "/api/status" && req.method === "GET") {
+    return json({ statuses: await allStatuses(), active: activeIds() });
+  }
+
+  if (pathname === "/api/reset" && req.method === "POST") {
+    const body = await req.json().catch(() => ({})) as { scope?: string };
+    if (body.scope === "registry" || body.scope === "all") {
+      try {
+        await Deno.remove(FILES.cache);
+      } catch { /* 不存在则忽略 */ }
+    }
+    if (body.scope === "results" || body.scope === "all") {
+      try {
+        await Deno.remove(`${FILES.processed}`);
+        await Deno.remove(RESULTS_DIR, { recursive: true });
+      } catch { /* 不存在则忽略 */ }
+    }
+    return json({ ok: true });
   }
 
   return json({ error: "not found" }, 404);
@@ -330,5 +396,5 @@ async function openWindow(url: string): Promise<void> {
 Deno.serve({ port: PORT }, handle);
 const url = `http://localhost:${PORT}`;
 console.log(`文件处理台已启动: ${url}`);
-console.log(`数据目录: ${DATA_DIR} (settings/processed/hash-cache)`);
+console.log(`数据目录: ${DATA_DIR} (settings/processed/hash-cache/results)`);
 if (!NO_OPEN) await openWindow(url);

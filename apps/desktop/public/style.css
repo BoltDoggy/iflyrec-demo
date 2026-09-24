@@ -6,6 +6,7 @@
   --muted: #8a919c;
   --accent: #3b82f6;
   --ok: #16a34a;
+  --err: #dc2626;
 }
 
 * { box-sizing: border-box; }
@@ -35,16 +36,17 @@ header .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
   margin-bottom: 16px;
 }
 
-.row { display: flex; align-items: center; gap: 8px; }
-.row .label { width: 48px; color: var(--muted); flex: none; }
-.row input[type="text"] {
+.row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.row .label { width: 88px; color: var(--muted); flex: none; font-size: 13px; }
+.row input[type="text"], .row input[type="password"], .row select {
   flex: 1;
   padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
   font-size: 13px;
+  background: #fff;
 }
-.row input:focus { outline: 2px solid #bfdbfe; border-color: var(--accent); }
+.row input:focus, .row select:focus { outline: 2px solid #bfdbfe; border-color: var(--accent); }
 
 button {
   padding: 7px 14px;
@@ -63,7 +65,7 @@ button.primary {
 }
 button.primary:hover:not(:disabled) { background: #2563eb; }
 
-.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 12px 56px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 6px 96px; }
 .chip {
   display: inline-flex;
   align-items: center;
@@ -82,9 +84,27 @@ button.primary:hover:not(:disabled) { background: #2563eb; }
   color: var(--muted);
   font-size: 14px;
 }
-.chip button:hover { color: #dc2626; background: none; }
-.hint { color: var(--muted); font-size: 13px; }
+.chip button:hover { color: var(--err); background: none; }
+.hint { color: var(--muted); font-size: 12.5px; }
 
+/* ---- 服务配置 ---- */
+.api-config { border-top: 1px dashed var(--line); margin-top: 14px; padding-top: 10px; }
+.api-config summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  user-select: none;
+}
+.api-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 28px;
+  margin-top: 12px;
+}
+.api-group h4 { margin: 0 0 4px; font-size: 13px; color: var(--text); }
+@media (max-width: 960px) { .api-grid { grid-template-columns: 1fr; } }
+
+/* ---- 工具栏与表格 ---- */
 .toolbar {
   display: flex;
   align-items: center;
@@ -121,8 +141,9 @@ th {
 }
 tbody tr:hover { background: #f8fafc; }
 tbody tr.done .name { color: var(--muted); }
+tbody tr.clickable { cursor: pointer; }
 .w-check { width: 34px; }
-.w-status { width: 90px; }
+.w-status { width: 100px; }
 .w-size { width: 80px; }
 .w-folder { max-width: 360px; }
 .w-time { width: 170px; }
@@ -147,20 +168,148 @@ tbody tr.done .name { color: var(--muted); }
 }
 
 .badge {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 12px;
   background: #eef2f7;
   color: var(--muted);
+  white-space: nowrap;
 }
 .badge.ok { background: #dcfce7; color: var(--ok); }
+.badge.err { background: #fee2e2; color: var(--err); }
+.badge.busy { background: #e0ecff; color: #1d4ed8; }
+
+.spin {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #93c5fd;
+  border-top-color: #1d4ed8;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 tr.paths td { padding: 4px 10px 10px 44px; background: #fbfcfd; }
 tr.paths ul { margin: 0; padding-left: 16px; color: var(--muted); font-size: 12.5px; }
 tr.paths li { font-family: ui-monospace, monospace; padding: 1px 0; }
 
 .empty { padding: 40px 0; text-align: center; color: var(--muted); }
+
+/* ---- 详情弹层 ---- */
+#modal { position: fixed; inset: 0; z-index: 50; }
+.modal-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+}
+.modal-body {
+  position: relative;
+  margin: 4vh auto 0;
+  width: min(960px, 94vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px 10px;
+}
+.modal-header h3 { margin: 0; font-size: 16px; word-break: break-all; }
+.modal-header button {
+  border: none;
+  font-size: 20px;
+  color: var(--muted);
+  padding: 2px 10px;
+}
+.modal-header button:hover { background: #f0f3f7; }
+.modal-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 0 20px 10px;
+  color: var(--muted);
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.tabs button {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+  background: none;
+  color: var(--muted);
+  padding: 8px 14px;
+}
+.tabs button.on {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 500;
+}
+
+.tab-panels { overflow: auto; padding: 16px 20px 24px; min-height: 200px; }
+.panel { display: none; }
+.panel.on { display: block; }
+
+.turn {
+  display: flex;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  align-items: baseline;
+}
+.turn:hover { background: #f8fafc; }
+.turn .t { color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace; flex: none; }
+.turn .spk {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+.spk-1 { background: #dbeafe; color: #1d4ed8; }
+.spk-2 { background: #dcfce7; color: #15803d; }
+.spk-3 { background: #fae8ff; color: #a21caf; }
+.spk-4 { background: #ffedd5; color: #c2410c; }
+.turn .txt { flex: 1; }
+
+.md h2 { font-size: 15px; margin: 18px 0 8px; }
+.md h3, .md h4, .md h5 { font-size: 13.5px; margin: 14px 0 6px; }
+.md ul { margin: 6px 0; padding-left: 20px; }
+.md li { margin: 3px 0; }
+.md ul.tasks { list-style: none; padding-left: 2px; }
+.md blockquote {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid #fde68a;
+  background: #fffbeb;
+  border-radius: 0 6px 6px 0;
+}
+.md code {
+  background: #eef2f7;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12.5px;
+}
+.md.outline ul { font-size: 13.5px; }
+.error { color: var(--err); }
+
+.panel .markmap { width: 100%; height: 60vh; }
+.panel .markmap svg { width: 100%; height: 100%; }
 
 #toast {
   position: fixed;
@@ -173,5 +322,7 @@ tr.paths li { font-family: ui-monospace, monospace; padding: 1px 0; }
   border-radius: 8px;
   font-size: 13px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  z-index: 60;
+  max-width: 80vw;
 }
 #toast.warn { background: #b45309; }

@@ -2,7 +2,9 @@
   "tasks": {
     "start": "deno run -A --no-lock main.ts",
     "dev": "deno run -A --no-lock --watch main.ts",
-    "check": "deno check main.ts"
+    "check": "deno check main.ts",
+    "test": "deno test -A --no-lock tests/",
+    "audio": "bash scripts/make-test-audio.sh test-dialog.wav"
   },
   "fmt": { "lineWidth": 100 },
   "lint": { "rules": { "tags": ["recommended"] } }
