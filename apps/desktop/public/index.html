@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>文件处理台</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>文件处理台</h1>
+      <p class="sub">目录扫描 · 内容去重 · 批量处理（当前处理逻辑为 mock）</p>
+    </div>
+    <button id="scan" class="primary">扫描</button>
+  </header>
+
+  <section class="card" id="settings">
+    <div class="row">
+      <span class="label">文件夹</span>
+      <input id="new-folder" type="text" placeholder="输入绝对路径, 回车或点添加, 如 /Users/me/Documents">
+      <button id="add-folder">添加</button>
+    </div>
+    <div id="folders" class="chips"></div>
+    <div class="row">
+      <span class="label">后缀</span>
+      <input id="exts" type="text" placeholder="wav, mp3, txt">
+      <button id="save-exts">保存</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="toolbar">
+      <label class="check"><input type="checkbox" id="select-all">全选</label>
+      <div id="filters" class="filters">
+        <button data-filter="all" class="on">全部</button>
+        <button data-filter="todo">未处理</button>
+        <button data-filter="done">已处理</button>
+      </div>
+      <span id="counts" class="counts"></span>
+      <span class="spacer"></span>
+      <button id="process" class="primary" disabled>处理选中</button>
+    </div>
+    <table id="files">
+      <thead>
+        <tr>
+          <th class="w-check"></th>
+          <th class="w-status">状态</th>
+          <th>文件</th>
+          <th class="w-size">大小</th>
+          <th class="w-folder">位置</th>
+          <th class="w-time">修改时间</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div id="empty" class="empty" hidden></div>
+  </section>
+
+  <div id="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

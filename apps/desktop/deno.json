@@ -1,0 +1,9 @@
+{
+  "tasks": {
+    "start": "deno run -A --no-lock main.ts",
+    "dev": "deno run -A --no-lock --watch main.ts",
+    "check": "deno check main.ts"
+  },
+  "fmt": { "lineWidth": 100 },
+  "lint": { "rules": { "tags": ["recommended"] } }
+}

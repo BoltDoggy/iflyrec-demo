@@ -1,0 +1,14 @@
+{
+  "name": "iflyrec-demo",
+  "private": true,
+  "packageManager": "pnpm@12.5.1",
+  "scripts": {
+    "detect": "bun packages/cli/src/main.ts",
+    "test": "pnpm -r --if-present run test",
+    "typecheck": "tsc --noEmit -p packages/core && tsc --noEmit -p packages/cli"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "typescript": "^5.9.0"
+  }
+}

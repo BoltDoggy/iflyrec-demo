@@ -1,0 +1,15 @@
+{
+  "name": "@iflyrec/detect-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "detect-new-files": "bin/detect-new-files.ts"
+  },
+  "scripts": {
+    "detect": "bun src/main.ts"
+  },
+  "dependencies": {
+    "@iflyrec/detect-core": "workspace:*"
+  }
+}
