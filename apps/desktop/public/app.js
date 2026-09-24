@@ -19,6 +19,7 @@ const state = {
 
 let pollTimer = null;
 let markmapReady = null;
+let pendingMindmap = null; // 打开详情时暂存, 切到导图 tab 再渲染(隐藏容器渲染会得到 NaN 坐标)
 
 init();
 
@@ -110,6 +111,12 @@ function bind() {
     $$(".panel").forEach((p) =>
       p.classList.toggle("on", p.id === `panel-${btn.dataset.tab}`)
     );
+    // 导图 tab 首次激活时才渲染: 容器可见才有布局尺寸, 避免 translate(NaN,NaN)
+    if (btn.dataset.tab === "mindmap" && pendingMindmap !== null) {
+      const md = pendingMindmap;
+      pendingMindmap = null;
+      renderMindmap(md);
+    }
   });
 }
 
@@ -419,12 +426,11 @@ async function openDetail(id) {
     ? `<div class="md">${renderMarkdown(r.summary)}</div>`
     : `<p class="hint">暂无总结</p>`;
 
-  // 思维导图
-  const mindmapPanel = $("#panel-mindmap");
-  mindmapPanel.innerHTML = `<p class="hint">${
-    r.mindmap ? "加载中…" : "暂无思维导图"
+  // 思维导图: 暂存内容, 切到对应 tab 再渲染
+  pendingMindmap = r.mindmap ?? null;
+  $("#panel-mindmap").innerHTML = `<p class="hint">${
+    r.mindmap ? "切到「思维导图」标签后渲染" : "暂无思维导图"
   }</p>`;
-  if (r.mindmap) renderMindmap(r.mindmap);
 
   // 默认切到文稿 tab
   $$(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === "transcript"));
@@ -438,28 +444,38 @@ function closeModal() {
 
 async function renderMindmap(md) {
   const panel = $("#panel-mindmap");
+  panel.innerHTML = `<p class="hint">渲染中…</p>`;
   const ok = await ensureMarkmap();
-  if (ok && window.markmap?.renderAll) {
-    panel.innerHTML =
-      `<div class="markmap"><script type="text/markdown">${md.replaceAll("</", "<\\/")}<\/script></div>`;
-    window.markmap.renderAll();
-  } else {
-    panel.innerHTML =
-      `<div class="md outline">${renderMarkdown(md)}</div>
-       <p class="hint">markmap 未能加载(CDN 需联网), 已退化为大纲文本</p>`;
+  if (!ok) return fallbackOutline(md, "markmap 组件加载失败");
+  panel.innerHTML = "";
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.style.cssText = "width:100%;height:60vh;display:block";
+  panel.appendChild(svg);
+  try {
+    window.__renderMarkmap(svg, md);
+  } catch (e) {
+    console.error("markmap 渲染失败:", e);
+    fallbackOutline(md);
   }
 }
 
+function fallbackOutline(md, reason = "渲染失败") {
+  $("#panel-mindmap").innerHTML =
+    `<div class="md outline">${renderMarkdown(md)}</div>
+     <p class="hint">思维导图${reason}, 已退化为大纲文本</p>`;
+}
+
+/** 本地内置的 markmap bundle (public/vendor), 不依赖外网 CDN。 */
 function ensureMarkmap() {
-  if (window.markmap) return Promise.resolve(true);
+  if (window.__renderMarkmap) return Promise.resolve(true);
   if (markmapReady) return markmapReady;
   markmapReady = new Promise((resolve) => {
     const s = document.createElement("script");
-    s.src = "https://cdn.jsdelivr.net/npm/markmap-autorun@0.16";
-    s.onload = () => resolve(!!window.markmap);
+    s.src = "/vendor/markmap.vendor.js";
+    s.onload = () => resolve(!!window.__renderMarkmap);
     s.onerror = () => resolve(false);
     document.head.appendChild(s);
-    setTimeout(() => resolve(!!window.markmap), 8000);
+    setTimeout(() => resolve(!!window.__renderMarkmap), 10000);
   });
   return markmapReady;
 }

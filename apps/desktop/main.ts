@@ -285,6 +285,7 @@ const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
+  ".map": "application/json",
 };
 
 async function staticFile(name: string): Promise<Response> {
@@ -305,6 +306,11 @@ async function handle(req: Request): Promise<Response> {
     if (pathname === "/" || pathname === "/index.html") return staticFile("index.html");
     if (pathname === "/app.js") return staticFile("app.js");
     if (pathname === "/style.css") return staticFile("style.css");
+    // 本地内置的前端三方库 (如 markmap), 离线可用
+    if (pathname.startsWith("/vendor/")) {
+      const name = pathname.slice("/vendor/".length);
+      if (/^[\w.-]+$/.test(name)) return staticFile(`vendor/${name}`);
+    }
   }
 
   if (pathname === "/api/settings") {

@@ -308,8 +308,7 @@ tr.paths li { font-family: ui-monospace, monospace; padding: 1px 0; }
 .md.outline ul { font-size: 13.5px; }
 .error { color: var(--err); }
 
-.panel .markmap { width: 100%; height: 60vh; }
-.panel .markmap svg { width: 100%; height: 100%; }
+#panel-mindmap svg { width: 100%; height: 60vh; }
 
 #toast {
   position: fixed;
