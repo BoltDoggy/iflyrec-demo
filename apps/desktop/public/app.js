@@ -431,13 +431,15 @@ async function openDetail(id) {
     briefEl.hidden = true;
   }
 
-  // 转写文稿
+  // 转写文稿: 失败时显示错误横幅, 但已完成的转写照样展示(总结失败不影响看文稿)
   const transcript = $("#panel-transcript");
+  let transcriptHtml = "";
   if (r.status === "error") {
-    transcript.innerHTML = `<p class="error">处理失败: ${escapeHtml(r.error ?? "")}</p>
+    transcriptHtml += `<p class="error">处理失败: ${escapeHtml(r.error ?? "")}</p>
       <p class="hint">勾选该文件后点「处理选中」可重试; 已完成的转写阶段不会重复计费。</p>`;
-  } else if (r.turns?.length) {
-    transcript.innerHTML = r.turns
+  }
+  if (r.turns?.length) {
+    transcriptHtml += r.turns
       .map((t) => {
         const n = ((Number(t.speaker) || 1) - 1) % 4 + 1;
         return `<div class="turn"><span class="t">[${fmtTime(t.start)}]</span>
@@ -445,9 +447,10 @@ async function openDetail(id) {
           <span class="txt">${escapeHtml(t.text)}</span></div>`;
       })
       .join("");
-  } else {
-    transcript.innerHTML = `<p class="hint">暂无文稿</p>`;
+  } else if (!transcriptHtml) {
+    transcriptHtml = `<p class="hint">暂无文稿</p>`;
   }
+  transcript.innerHTML = transcriptHtml;
 
   // 总结
   $("#panel-summary").innerHTML = r.summary

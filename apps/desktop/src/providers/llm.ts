@@ -27,7 +27,7 @@ async function openaiChat(cfg: LlmConfig, system: string, user: string): Promise
       ],
       temperature: 0.3,
     }),
-    signal: AbortSignal.timeout(120_000),
+    // 不设客户端超时: 长录音文稿的总结生成可能远超 2 分钟
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
